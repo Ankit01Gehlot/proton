@@ -89,6 +89,12 @@ StreamKVShard::StreamKVShard(
     }
 }
 
+// you shall impl this, cause header(streamkvshard.h) is `override` dtor
+StreamKVShard::~StreamKVShard()
+{
+
+}
+
 void StreamKVShard::doCommit(Block block, SequencePair seq_pair, std::shared_ptr<IdempotentKeys> keys, SequenceRanges missing_sequence_ranges)
 {
     {
@@ -102,7 +108,8 @@ void StreamKVShard::doCommit(Block block, SequencePair seq_pair, std::shared_ptr
         /// the offset checkpointing
         if (!block)
         {
-            progressSequencesWithoutLock(seq_pair);
+            // this is parent private function, turn to protect?
+            // progressSequencesWithoutLock(seq_pair);
             return;
         }
 
@@ -112,7 +119,7 @@ void StreamKVShard::doCommit(Block block, SequencePair seq_pair, std::shared_ptr
     /// Commit blocks to file system async
     part_commit_pool.scheduleOrThrowOnError([&,
                                              moved_block = std::move(block),
-                                             moved_seq = std::move(seq_pair),
+                                            moved_seq = std::move(seq_pair),
                                              moved_keys = std::move(keys),
                                              moved_sequence_ranges = std::move(missing_sequence_ranges),
                                              this]() mutable {
@@ -144,7 +151,8 @@ void StreamKVShard::doCommit(Block block, SequencePair seq_pair, std::shared_ptr
             }
         }
 
-        progressSequences(moved_seq);
+ // this is parent private function
+//        progressSequences(moved_seq);
     });
 
     commitSN();
