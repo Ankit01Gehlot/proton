@@ -9,10 +9,11 @@ namespace DB
 {
 namespace Streaming
 {
+
 class ReplayStreamTransform final : public ISimpleTransform
 {
 public:
-    ReplayStreamTransform(const Block & header, Float32 replay_speed_, Int64 last_sn_);
+    ReplayStreamTransform(const Block & header, Float32 replay_speed_, Int64 last_sn_, const String & replay_time_col_);
     String getName() const override { return "ReplayStreamTransform"; }
     void transform(Chunk & chunk) override;
 
@@ -25,6 +26,7 @@ private:
     std::optional<Int64> last_batch_time;
     Int64 wait_interval_ms = 0;
     bool enable_replay = true;
+    const String replay_time_col;
 };
 }
 }

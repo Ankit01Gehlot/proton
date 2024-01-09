@@ -16,13 +16,17 @@ namespace Streaming
 
 constexpr Int64 MAX_WAIT_INTERVAL_MS = 500;
 
-ReplayStreamTransform::ReplayStreamTransform(const Block & header, Float32 replay_speed_, Int64 last_sn_)
+ReplayStreamTransform::ReplayStreamTransform(const Block & header, Float32 replay_speed_, Int64 last_sn_, const String & replay_time_col_)
     : ISimpleTransform(header, header, true, ProcessorID::ReplayStreamTransformID)
     , replay_speed(replay_speed_)
     , last_sn(last_sn_)
     , enable_replay(last_sn >= 0)
+    , replay_time_col(replay_time_col_)
 {
-    append_time_index = header.getPositionByName(ProtonConsts::RESERVED_APPEND_TIME);
+    append_time_index = header.getPositionByName(replay_time_col);
+    auto & type = header.getByPosition(append_time_index).type;
+    if (!isDateTime64(type))
+        throw Exception("ReplayStreamTransform: column " + replay_time_col + " must be Date or DateTime type", ErrorCodes::LOGICAL_ERROR);
     sn_index = header.getPositionByName(ProtonConsts::RESERVED_EVENT_SEQUENCE_ID);
 }
 

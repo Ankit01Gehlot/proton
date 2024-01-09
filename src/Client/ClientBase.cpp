@@ -844,7 +844,7 @@ void ClientBase::receiveResult(ASTPtr parsed_query)
     const size_t poll_interval
         = std::max(min_poll_interval, std::min<size_t>(receive_timeout.totalMicroseconds(), default_poll_interval));
 
-    bool break_on_timeout = connection->getConnectionType() != IServerConnection::Type::LOCAL;
+    [[maybe_unused]] bool break_on_timeout = connection->getConnectionType() != IServerConnection::Type::LOCAL;
 
     std::exception_ptr local_format_error;
 
@@ -864,18 +864,18 @@ void ClientBase::receiveResult(ASTPtr parsed_query)
                 {
                     cancelQuery();
                 }
-                else
-                {
-                    double elapsed = receive_watch.elapsedSeconds();
-                    if (break_on_timeout && elapsed > receive_timeout.totalSeconds())
-                    {
-                        std::cout << "Timeout exceeded while receiving data from server."
-                                    << " Waited for " << static_cast<size_t>(elapsed) << " seconds,"
-                                    << " timeout is " << receive_timeout.totalSeconds() << " seconds." << std::endl;
+                // else
+                // {
+                //     double elapsed = receive_watch.elapsedSeconds();
+                //     if (break_on_timeout && elapsed > receive_timeout.totalSeconds())
+                //     {
+                //         std::cout << "Timeout exceeded while receiving data from server."
+                //                     << " Waited for " << static_cast<size_t>(elapsed) << " seconds,"
+                //                     << " timeout is " << receive_timeout.totalSeconds() << " seconds." << std::endl;
 
-                        cancelQuery();
-                    }
-                }
+                //         cancelQuery();
+                //     }
+                // }
             }
 
             /// Poll for changes after a cancellation check, otherwise it never reached
