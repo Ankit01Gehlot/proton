@@ -30,6 +30,37 @@ ReplayStreamTransform::ReplayStreamTransform(const Block & header, Float32 repla
     sn_index = header.getPositionByName(ProtonConsts::RESERVED_EVENT_SEQUENCE_ID);
 }
 
+ISimpleTransform::Status ReplayStreamTransform::prepare()
+{
+    /// Check can output.
+
+    if (output.isFinished())
+    {
+        input.close();
+        return Status::Finished;
+    }
+
+    if (!output.canPush())
+    {
+        input.setNotNeeded();
+        return Status::PortFull;
+    }
+    /// Output if has data.
+    if (has_output)
+    {
+        output.pushData(std::move(output_data));
+        has_output = false;
+
+        if (!no_more_data_needed)
+            return Status::PortFull;
+    }
+}
+
+void ReplayStreamTransform::work()
+{
+
+}
+
 void ReplayStreamTransform::transform(Chunk & chunk)
 {
     if (!enable_replay || !chunk.rows())
