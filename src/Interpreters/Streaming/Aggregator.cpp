@@ -3317,6 +3317,22 @@ std::vector<Int64> Aggregator::bucketsBefore(const AggregatedDataVariants & resu
     return {};
 }
 
+std::vector<Int64> Aggregator::buckets(const AggregatedDataVariants & result) const
+{
+    switch (result.type)
+    {
+#define M(NAME) \
+            case AggregatedDataVariants::Type::NAME: return result.NAME->data.buckets();
+        APPLY_FOR_VARIANTS_TIME_BUCKET_TWO_LEVEL(M)
+#undef M
+
+        default:
+            break;
+    }
+
+    return {};
+}
+
 /// The complexity of checkpoint the state of Aggregator is a combination of the following 2 cases
 /// 1) The keys can reside in hashmap or in arena
 /// 2) The state can reside in arena or in the aggregation function
@@ -4069,13 +4085,14 @@ std::pair<bool, bool> Aggregator::executeAndRetractOnBlock(
 std::pair<AggregatedDataVariantsPtr, AggregatedDataVariantsPtr>
 Aggregator::mergeRetractedGroups(ManyAggregatedDataVariants & aggregated_data, ManyAggregatedDataVariants & retracted_data) const
 {
-    auto prepared_data = prepareVariantsToMerge(aggregated_data, /*always_merge_into_empty*/ true);
+    bool always_merge_into_empty = method_chosen != AggregatedDataVariants::Type::without_key;
+    auto prepared_data = prepareVariantsToMerge(aggregated_data, always_merge_into_empty);
     if (prepared_data->empty())
         return {};
 
     auto first = prepared_data->at(0);
 
-    auto prepared_retracted_data = prepareVariantsToMerge(retracted_data, first->type != AggregatedDataVariants::Type::without_key);
+    auto prepared_retracted_data = prepareVariantsToMerge(retracted_data, always_merge_into_empty);
     assert(!prepared_retracted_data->empty());
 
     /// So far, only global aggregation support emit changelog, so time bucket two level is not possible
@@ -4087,7 +4104,7 @@ Aggregator::mergeRetractedGroups(ManyAggregatedDataVariants & aggregated_data, M
     if (first->type == AggregatedDataVariants::Type::without_key)
     {
         mergeWithoutKeyDataImpl(*prepared_retracted_data, true);
-        mergeWithoutKeyDataImpl(*prepared_data, false);
+        mergeWithoutKeyDataImpl(*prepared_data, true);
     }
     APPLY_FOR_VARIANTS_SINGLE_LEVEL_STREAMING(M)
     APPLY_FOR_VARIANTS_STATIC_BUCKET_TWO_LEVEL(M)

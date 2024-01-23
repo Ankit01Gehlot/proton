@@ -807,6 +807,7 @@ public:
     std::pair<AggregatedDataVariantsPtr, AggregatedDataVariantsPtr>
     mergeRetractedGroups(ManyAggregatedDataVariants & aggregated_data, ManyAggregatedDataVariants & retracted_data) const;
 
+    std::vector<Int64> buckets(const AggregatedDataVariants & result) const;
     std::vector<Int64> bucketsBefore(const AggregatedDataVariants & result, Int64 max_bucket) const;
     void removeBucketsBefore(AggregatedDataVariants & result, Int64 max_bucket) const;
 

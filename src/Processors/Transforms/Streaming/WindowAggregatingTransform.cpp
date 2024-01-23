@@ -3,6 +3,8 @@
 #include <Processors/Transforms/Streaming/AggregatingHelper.h>
 #include <Processors/Transforms/convertToChunk.h>
 
+#include <ranges>
+
 namespace DB
 {
 namespace Streaming
@@ -37,23 +39,30 @@ WindowAggregatingTransform::WindowAggregatingTransform(
 
     if (output_header.has(ProtonConsts::STREAMING_WINDOW_END))
         window_end_col_pos = output_header.getPositionByName(ProtonConsts::STREAMING_WINDOW_END);
+
+    /// FIXME: for `emit on update`, only emit updated windows or updated groups ?
+    only_emit_finalized_windows = params->watermark_emit_mode == WatermarkEmitMode::OnWindow;
 }
 
 bool WindowAggregatingTransform::needFinalization(Int64 min_watermark) const
 {
-    if (min_watermark <= many_data->finalized_watermark.load(std::memory_order_relaxed))
+    if (only_emit_finalized_windows && min_watermark <= many_data->finalized_watermark.load(std::memory_order_relaxed))
         return false;
 
-    auto local_windows_with_buckets = getLocalFinalizedWindowsWithBucketsImpl(min_watermark);
+    auto local_windows_with_buckets = getLocalWindowsWithBucketsImpl();
 
-    /// In case when some lagged events arrived after timeout, we skip finalized windows and remove them later
+    /// We need to remove some invalid windows, when:
+    /// 1) some lagged events arrived after timeout, we skip finalized windows and remove them later
+    /// 2) if we only emit finalized windows, skip imtermidate windows
     auto last_finalized_window_end = many_data->finalized_window_end.load(std::memory_order_relaxed);
     for (auto iter = local_windows_with_buckets.begin(); iter != local_windows_with_buckets.end();)
     {
-        if (iter->window.end <= last_finalized_window_end)
+        bool is_invalid_window = iter->window.end <= last_finalized_window_end;
+        is_invalid_window |= only_emit_finalized_windows && iter->window.end > min_watermark;
+        if (is_invalid_window)
             iter = local_windows_with_buckets.erase(iter);
         else
-            break; /// No need check next elements, since windows is always sorted.
+            ++iter;
     }
 
     /// Has windows to finalize
@@ -62,24 +71,36 @@ bool WindowAggregatingTransform::needFinalization(Int64 min_watermark) const
 
 bool WindowAggregatingTransform::prepareFinalization(Int64 min_watermark)
 {
-    if (min_watermark <= many_data->finalized_watermark.load(std::memory_order_relaxed))
+    /// If we only emit finalized windows and the watermark has been finalized in by another AggregatingTransform, skip it
+    if (only_emit_finalized_windows && min_watermark <= many_data->finalized_watermark.load(std::memory_order_relaxed))
         return false;
+
+    /// If there is no new data, don't emit aggr result, it's only possible for emit periodic
+    /// FIXME: For multiple WindowAggregatingTransform, will emit multiple times in a periodic interval,
+    /// we can do periodic emit in AggregatingTransform, not in WatermarkTransform.
+    if (!many_data->hasNewData())
+    {
+        assert(params->watermark_emit_mode == WatermarkEmitMode::Periodic);
+        return false;
+    }
 
     /// After acquired finalizing lock
     prepared_windows_with_buckets.clear();
     for (auto * aggr_transform : many_data->aggregating_transforms)
     {
         auto * window_aggr_transform = reinterpret_cast<WindowAggregatingTransform *>(aggr_transform);
-        auto windows_with_buckets = window_aggr_transform->getLocalFinalizedWindowsWithBucketsImpl(min_watermark);
+        auto windows_with_buckets = window_aggr_transform->getLocalWindowsWithBucketsImpl();
 
         /// In case when some lagged events arrived after timeout, we skip finalized windows and remove them later
         auto last_finalized_window_end = many_data->finalized_window_end.load(std::memory_order_relaxed);
         for (auto iter = windows_with_buckets.begin(); iter != windows_with_buckets.end();)
         {
-            if (iter->window.end <= last_finalized_window_end)
+            bool is_invalid_window = iter->window.end <= last_finalized_window_end;
+            is_invalid_window |= only_emit_finalized_windows && iter->window.end > min_watermark;
+            if (is_invalid_window)
                 iter = windows_with_buckets.erase(iter);
             else
-                break; /// No need check next elements, since windows is always sorted.
+                ++iter;
         }
 
         for (auto & window_with_buckets : windows_with_buckets)
@@ -134,7 +155,12 @@ void WindowAggregatingTransform::finalize(const ChunkContextPtr & chunk_ctx)
         chunk = AggregatingHelper::mergeAndSpliceAndConvertBucketsToChunk(many_data->variants, *params, window_with_buckets.buckets);
 
         if (needReassignWindow())
-            reassignWindow(chunk, window_with_buckets.window, params->params.window_params->time_col_is_datetime64, window_start_col_pos, window_end_col_pos);
+            reassignWindow(
+                chunk,
+                window_with_buckets.window,
+                params->params.window_params->time_col_is_datetime64,
+                window_start_col_pos,
+                window_end_col_pos);
 
         if (params->emit_version && params->final)
             emitVersion(chunk);
@@ -142,12 +168,20 @@ void WindowAggregatingTransform::finalize(const ChunkContextPtr & chunk_ctx)
         merged_chunk.append(std::move(chunk));
     }
 
-    many_data->finalized_window_end.store(prepared_windows_with_buckets.back().window.end, std::memory_order_relaxed);
+    merged_chunk.setChunkContext(chunk_ctx);
+    auto finalized_watermark = chunk_ctx->getWatermark();
+    for (const auto & window_with_buckets : prepared_windows_with_buckets | std::views::reverse)
+    {
+        /// If there are only intermediate windows, then just emit but not finalize
+        if (window_with_buckets.window.end <= finalized_watermark)
+        {
+            many_data->finalized_window_end.store(window_with_buckets.window.end, std::memory_order_relaxed);
+            break;
+        }
+    }
     prepared_windows_with_buckets.clear();
     prepared_windows_with_buckets.shrink_to_fit();
 
-    merged_chunk.setChunkContext(chunk_ctx);
-    auto finalized_watermark = chunk_ctx->getWatermark();
     /// If is timeout, we set watermark after actual finalized last window end
     if (unlikely(finalized_watermark == TIMEOUT_WATERMARK))
     {
@@ -168,11 +202,11 @@ void WindowAggregatingTransform::clearExpiredState(Int64 finalized_watermark)
     removeBucketsImpl(finalized_watermark);
 }
 
-std::vector<Int64> WindowAggregatingTransform::getBucketsBefore(Int64 max_bucket) const
+std::vector<Int64> WindowAggregatingTransform::getBuckets() const
 {
     /// Blocking finalization, it's a lightweight lock
     std::lock_guard lock(variants_mutex);
-    return params->aggregator.bucketsBefore(variants, max_bucket);
+    return params->aggregator.buckets(variants);
 }
 
 }

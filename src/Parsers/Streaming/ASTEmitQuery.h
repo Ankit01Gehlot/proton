@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Parsers/IAST.h>
+#include <Core/Streaming/Watermark.h>
 
 namespace DB
 {
@@ -13,21 +14,23 @@ public:
     };
     StreamMode stream_mode = StreamMode::STREAM;
 
-    /// [AFTER WATERMARK]
-    bool after_watermark = false;
+    /// [AFTER WATERMARK WITH DELAY <interval> | WITHOUT DELAY], 
+    Streaming::WatermarkStrategy watermark_strategy = Streaming::WatermarkStrategy::Unknown;
 
-    /// proc time or event time processing. This is for (last-x for now)
-    /// LAST 1h ON PROCTIME
-    bool proc_time = false;
+    /// [WITH DELAY INTERVAL 1 SECOND]. This is used for `WatermarkStrategy::BoundedOutOfOrderness`
+    ASTPtr delay_interval;
+
+    /// [ON UPDATE]
+    bool on_update = false;
 
     /// [PERIODIC INTERVAL 1 SECOND]
     ASTPtr periodic_interval;
-    /// [DELAY INTERVAL 1 SECOND]
-    ASTPtr delay_interval;
-    /// [LAST <last-x>]
-    ASTPtr last_interval;
+
     /// [TIMEOUT INTERVAL 5 SECOND]
     ASTPtr timeout_interval;
+    /// [LAST <last-x> [ON PROCTIME]]]
+    ASTPtr last_interval;
+    bool proc_time = false; /// Proc time or event time processing.
 
     String getID(char) const override { return "Emit"; }
 

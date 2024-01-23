@@ -22,6 +22,10 @@ WindowAggregatingTransformWithSubstream::WindowAggregatingTransformWithSubstream
 
     if (output_header.has(ProtonConsts::STREAMING_WINDOW_END))
         window_end_col_pos = output_header.getPositionByName(ProtonConsts::STREAMING_WINDOW_END);
+
+    /// So far, emit all windows groups for `emit peridoic` or `emit on update`.
+    /// FIXME: for `emit on update`, only emit updated windows or updated groups ?
+    only_emit_finalized_windows = params->watermark_emit_mode == WatermarkEmitMode::OnWindow;
 }
 
 /// Finalize what we have in memory and produce a finalized Block
@@ -35,7 +39,13 @@ void WindowAggregatingTransformWithSubstream::finalize(const SubstreamContextPtr
         substream_ctx->resetRowCounts();
         substream_ctx->finalized_watermark = finalized_watermark;
     });
-    SCOPE_EXIT({ substream_ctx->resetRowCounts(); });
+
+    /// If there is no new data, don't emit aggr result, it's only possible for emit periodic
+    if (!substream_ctx->hasNewData())
+    {
+        assert(params->watermark_emit_mode == WatermarkEmitMode::Periodic);
+        return;
+    }
 
     /// Finalize current watermark
     auto start = MonotonicMilliseconds::now();
@@ -64,19 +74,26 @@ void WindowAggregatingTransformWithSubstream::doFinalize(
     Chunk merged_chunk;
     Chunk chunk;
 
-    const auto & last_finalized_windows_with_buckets = getFinalizedWindowsWithBuckets(substream_ctx->finalized_watermark, substream_ctx);
-    const auto & windows_with_buckets = getFinalizedWindowsWithBuckets(watermark, substream_ctx);
+    const auto & last_finalized_windows = getLastFinalizedWindow(substream_ctx);
+    const auto & windows_with_buckets = getWindowsWithBuckets(substream_ctx);
     for (const auto & window_with_buckets : windows_with_buckets)
     {
         /// In case when some lagged events arrived after timeout, we skip the finalized windows
-        if (!last_finalized_windows_with_buckets.empty()
-            && window_with_buckets.window.end <= last_finalized_windows_with_buckets.back().window.end)
+        if (last_finalized_windows.isValid() && window_with_buckets.window.end <= last_finalized_windows.end)
+            continue;
+
+        if (only_emit_finalized_windows && window_with_buckets.window.end > watermark)
             continue;
 
         chunk = AggregatingHelper::spliceAndConvertBucketsToChunk(data_variant, *params, window_with_buckets.buckets);
 
         if (needReassignWindow())
-            reassignWindow(chunk, window_with_buckets.window, params->params.window_params->time_col_is_datetime64, window_start_col_pos, window_end_col_pos);
+            reassignWindow(
+                chunk,
+                window_with_buckets.window,
+                params->params.window_params->time_col_is_datetime64,
+                window_start_col_pos,
+                window_end_col_pos);
 
         if (params->emit_version && params->final)
             emitVersion(chunk, substream_ctx);
