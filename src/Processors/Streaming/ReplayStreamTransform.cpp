@@ -26,7 +26,7 @@ ReplayStreamTransform::ReplayStreamTransform(const Block & header, Float32 repla
     time_index = header.getPositionByName(replay_time_col);
     auto & type = header.getByPosition(time_index).type;
     if (!isDateTime64(type))
-        throw Exception("ReplayStreamTransform: column " + replay_time_col + " must be Date or DateTime type", ErrorCodes::LOGICAL_ERROR);
+        throw Exception(fmt::format("ReplayStreamTransform need datatime64 type column, but got {}", type->getName()), ErrorCodes::LOGICAL_ERROR);
     sn_index = header.getPositionByName(ProtonConsts::RESERVED_EVENT_SEQUENCE_ID);
 }
 
