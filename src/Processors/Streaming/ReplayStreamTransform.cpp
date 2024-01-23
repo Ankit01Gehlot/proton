@@ -23,58 +23,91 @@ ReplayStreamTransform::ReplayStreamTransform(const Block & header, Float32 repla
     , enable_replay(last_sn >= 0)
     , replay_time_col(replay_time_col_)
 {
-    append_time_index = header.getPositionByName(replay_time_col);
-    auto & type = header.getByPosition(append_time_index).type;
+    time_index = header.getPositionByName(replay_time_col);
+    auto & type = header.getByPosition(time_index).type;
     if (!isDateTime64(type))
         throw Exception("ReplayStreamTransform: column " + replay_time_col + " must be Date or DateTime type", ErrorCodes::LOGICAL_ERROR);
     sn_index = header.getPositionByName(ProtonConsts::RESERVED_EVENT_SEQUENCE_ID);
 }
 
-ISimpleTransform::Status ReplayStreamTransform::prepare()
-{
-    /// Check can output.
-
-    if (output.isFinished())
-    {
-        input.close();
-        return Status::Finished;
-    }
-
-    if (!output.canPush())
-    {
-        input.setNotNeeded();
-        return Status::PortFull;
-    }
-    /// Output if has data.
-    if (has_output)
-    {
-        output.pushData(std::move(output_data));
-        has_output = false;
-
-        if (!no_more_data_needed)
-            return Status::PortFull;
-    }
-}
-
 void ReplayStreamTransform::work()
 {
+    if (input_data.exception)
+    {
+        /// Skip transform in case of exception.
+        output_data = std::move(input_data);
+        has_input = false;
+        has_output = true;
+        return;
+    }
 
+    /// proton: starts.
+    auto start_ns = MonotonicNanoseconds::now();
+    metrics.processed_bytes += input_data.chunk.bytes();
+    /// proton: ends.
+    try
+    {
+        transform(input_data.chunk, output_data.chunk);
+
+        metrics.processing_time_ns += MonotonicNanoseconds::now() - start_ns;
+        /// proton: ends.
+    }
+    catch (DB::Exception &)
+    {
+        output_data.exception = std::current_exception();
+        has_output = true;
+        has_input = false;
+        return;
+    }
+
+    /// proton: starts. For case like SELECT count(*) FROM table WHERE expression EMIT STREAM PERIODIC INTERVAL 2 SECOND
+    /// the output.header is empty. So we need explicitly check watermark chunk info here to propagate empty chunk
+    /// with watermark.
+    /// P.S. need propagate other chunk context like checkpoint context etc as well
+    if (!skip_empty_chunks || output_data.chunk || output_data.chunk.hasChunkContext())
+        has_output = true;
+    /// proton: ends
+
+    if (has_output && !output_data.chunk && getOutputPort().getHeader())
+        /// Support invariant that chunks must have the same number of columns as header.
+        output_data.chunk = Chunk(
+            getOutputPort().getHeader().cloneEmpty().getColumns(),
+            0,
+            output_data.chunk.getChunkInfo(),
+            output_data.chunk.getChunkContext()); /// proton : propagate chunk context
 }
 
 void ReplayStreamTransform::transform(Chunk & chunk)
 {
-    if (!enable_replay || !chunk.rows())
-        return;
 
-    /// get the time of this chunk.
-    const auto & columns = chunk.getColumns();
-    auto this_batch_time = columns[append_time_index]->getInt(0);
-    auto this_batch_last_sn = columns[sn_index]->getInt(chunk.rows() - 1);
+}
+
+void ReplayStreamTransform::transform(Chunk & input_chunk, Chunk & output_chunk)
+{
+    if (!enable_replay || !input_chunk.rows())
+        return;
+    
+    // Chunk chunk;
+    UInt64 cur_index = index;
+
+    const auto & columns = input_chunk.getColumns();
+    auto this_batch_last_sn = columns[sn_index]->getInt(input_chunk.rows() - 1);
 
     /// mark the historical data replay end and begin stream query.
     if (this_batch_last_sn >= last_sn)
         enable_replay = false;
 
+    while (index < input_chunk.rows())
+    {
+        if (columns[time_index]->getInt(index) != columns[time_index]->getInt(cur_index))
+            break;
+        ++index;
+    }
+
+    for (const auto & col : columns)
+        output_chunk.addColumn(col->cut(cur_index, index - cur_index));
+
+    auto this_batch_time = columns[cur_index]->getInt(0);
     wait_interval_ms
         = static_cast<Int64>(std::lround((last_batch_time.has_value() ? this_batch_time - last_batch_time.value() : 0) / replay_speed));
     last_batch_time = this_batch_time;
@@ -87,6 +120,13 @@ void ReplayStreamTransform::transform(Chunk & chunk)
         auto sleep_interval_ms = wait_interval_ms > MAX_WAIT_INTERVAL_MS ? MAX_WAIT_INTERVAL_MS : wait_interval_ms;
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_interval_ms));
         wait_interval_ms -= sleep_interval_ms;
+    }
+
+    if (index >= input_chunk.rows())
+    {
+        input_chunk.clear();
+        index = 0;
+        has_input = false;
     }
 }
 }
