@@ -41,7 +41,8 @@ WindowAggregatingTransform::WindowAggregatingTransform(
         window_end_col_pos = output_header.getPositionByName(ProtonConsts::STREAMING_WINDOW_END);
 
     /// FIXME: for `emit on update`, only emit updated windows or updated groups ?
-    only_emit_finalized_windows = params->watermark_emit_mode == WatermarkEmitMode::OnWindow;
+    only_emit_finalized_windows
+        = !(params->watermark_emit_mode == WatermarkEmitMode::Periodic || params->watermark_emit_mode == WatermarkEmitMode::OnUpdate);
 }
 
 bool WindowAggregatingTransform::needFinalization(Int64 min_watermark) const
@@ -75,14 +76,10 @@ bool WindowAggregatingTransform::prepareFinalization(Int64 min_watermark)
     if (only_emit_finalized_windows && min_watermark <= many_data->finalized_watermark.load(std::memory_order_relaxed))
         return false;
 
-    /// If there is no new data, don't emit aggr result, it's only possible for emit periodic
     /// FIXME: For multiple WindowAggregatingTransform, will emit multiple times in a periodic interval,
     /// we can do periodic emit in AggregatingTransform, not in WatermarkTransform.
-    if (!many_data->hasNewData())
-    {
-        assert(params->watermark_emit_mode == WatermarkEmitMode::Periodic);
+    if (params->watermark_emit_mode == WatermarkEmitMode::Periodic && !many_data->hasNewData())
         return false;
-    }
 
     /// After acquired finalizing lock
     prepared_windows_with_buckets.clear();

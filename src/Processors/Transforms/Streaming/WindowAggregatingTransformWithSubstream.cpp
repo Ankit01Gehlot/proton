@@ -25,7 +25,8 @@ WindowAggregatingTransformWithSubstream::WindowAggregatingTransformWithSubstream
 
     /// So far, emit all windows groups for `emit peridoic` or `emit on update`.
     /// FIXME: for `emit on update`, only emit updated windows or updated groups ?
-    only_emit_finalized_windows = params->watermark_emit_mode == WatermarkEmitMode::OnWindow;
+    only_emit_finalized_windows
+        = !(params->watermark_emit_mode == WatermarkEmitMode::Periodic || params->watermark_emit_mode == WatermarkEmitMode::OnUpdate);
 }
 
 /// Finalize what we have in memory and produce a finalized Block
@@ -40,12 +41,8 @@ void WindowAggregatingTransformWithSubstream::finalize(const SubstreamContextPtr
         substream_ctx->finalized_watermark = finalized_watermark;
     });
 
-    /// If there is no new data, don't emit aggr result, it's only possible for emit periodic
-    if (!substream_ctx->hasNewData())
-    {
-        assert(params->watermark_emit_mode == WatermarkEmitMode::Periodic);
+    if (params->watermark_emit_mode == WatermarkEmitMode::Periodic && !substream_ctx->hasNewData())
         return;
-    }
 
     /// Finalize current watermark
     auto start = MonotonicMilliseconds::now();
